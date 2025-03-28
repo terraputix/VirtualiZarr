@@ -25,6 +25,7 @@ from virtualizarr.readers import (
     DMRPPVirtualBackend,
     FITSVirtualBackend,
     HDFVirtualBackend,
+    OmFilesVirtualBackend,
     KerchunkVirtualBackend,
     NetCDF3VirtualBackend,
     TIFFVirtualBackend,
@@ -46,6 +47,7 @@ VIRTUAL_BACKENDS = {
     "dmrpp": DMRPPVirtualBackend,
     "hdf5": HDFVirtualBackend,
     "netcdf4": HDFVirtualBackend,  # note this is the same as for hdf5
+    "omfiles": OmFilesVirtualBackend,
     # all the below call one of the kerchunk backends internally (https://fsspec.github.io/kerchunk/reference.html#file-format-backends)
     "netcdf3": NetCDF3VirtualBackend,
     "tiff": TIFFVirtualBackend,
