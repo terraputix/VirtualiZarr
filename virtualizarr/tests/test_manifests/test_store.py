@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import pickle
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
+import numpy as np
 import pytest
 from zarr.abc.store import (
     OffsetByteRequest,
@@ -19,6 +20,7 @@ from virtualizarr.manifests import (
     ManifestGroup,
     ManifestStore,
 )
+from virtualizarr.manifests.utils import create_v3_array_metadata
 from virtualizarr.tests import requires_minio, requires_obstore
 
 if TYPE_CHECKING:
@@ -26,7 +28,7 @@ if TYPE_CHECKING:
 
 
 def _generate_manifest_store(
-    store: ObjectStore, *, prefix: str, filepath: str, array_v3_metadata: Callable
+    store: ObjectStore, *, prefix: str, filepath: str
 ) -> ManifestStore:
     """
     Generate a ManifestStore for testing.
@@ -66,18 +68,25 @@ def _generate_manifest_store(
         "1.1": {"path": f"{prefix}/{filepath}", "offset": 12, "length": 4},
     }
     manifest = ChunkManifest(entries=chunk_dict)
-    chunks = (1, 4)
-    shape = (2, 8)
-    array_metadata = array_v3_metadata(shape=shape, chunks=chunks)
+    codecs = [{"configuration": {"endian": "little"}, "name": "bytes"}]
+    array_metadata = create_v3_array_metadata(
+        shape=(4, 4),
+        chunk_shape=(2, 2),
+        data_type=np.dtype("int32"),
+        codecs=codecs,
+        chunk_key_encoding={"name": "default", "separator": "."},
+        fill_value=0,
+    )
     manifest_array = ManifestArray(metadata=array_metadata, chunkmanifest=manifest)
     manifest_group = ManifestGroup(
-        {"foo": manifest_array, "bar": manifest_array}, attributes={"Zarr": "Hooray!"}
+        arrays={"foo": manifest_array, "bar": manifest_array},
+        attributes={"Zarr": "Hooray!"},
     )
-    return ManifestStore(stores={prefix: store}, manifest_group=manifest_group)
+    return ManifestStore(stores={prefix: store}, group=manifest_group)
 
 
 @pytest.fixture()
-def local_store(tmpdir, array_v3_metadata):
+def local_store(tmpdir):
     import obstore as obs
 
     store = obs.store.LocalStore()
@@ -87,12 +96,11 @@ def local_store(tmpdir, array_v3_metadata):
         store=store,
         prefix=prefix,
         filepath=filepath,
-        array_v3_metadata=array_v3_metadata,
     )
 
 
 @pytest.fixture()
-def s3_store(minio_bucket, array_v3_metadata):
+def s3_store(minio_bucket):
     import obstore as obs
 
     store = obs.store.S3Store(
@@ -109,7 +117,6 @@ def s3_store(minio_bucket, array_v3_metadata):
         store=store,
         prefix=prefix,
         filepath=filepath,
-        array_v3_metadata=array_v3_metadata,
     )
 
 
@@ -163,7 +170,7 @@ class TestManifestStore:
             "foo/zarr.json", prototype=default_buffer_prototype()
         )
         metadata = json.loads(observed.to_bytes())
-        assert metadata["chunk_grid"]["configuration"]["chunk_shape"] == [1, 4]
+        assert metadata["chunk_grid"]["configuration"]["chunk_shape"] == [2, 2]
         assert metadata["node_type"] == "array"
         assert metadata["zarr_format"] == 3
 
@@ -206,3 +213,41 @@ class TestManifestStore:
             await local_store.set_if_not_exists("foo/zarr.json", 1)
         with pytest.raises(NotImplementedError):
             await local_store.delete("foo")
+
+
+@requires_obstore
+class TestToVirtualXarray:
+    def test_single_group_to_dataset(self, manifest_array):
+        import obstore as obs
+
+        marr1 = manifest_array(
+            shape=(3, 2, 5), chunks=(1, 2, 1), dimension_names=["x", "y", "t"]
+        )
+        marr2 = manifest_array(shape=(3, 2), chunks=(1, 2), dimension_names=["x", "y"])
+        marr3 = manifest_array(shape=(5,), chunks=(5,), dimension_names=["t"])
+
+        manifest_group = ManifestGroup(
+            arrays={
+                "T": marr1,  # data variable
+                "elevation": marr2,  # 2D coordinate
+                "t": marr3,  # 1D dimension coordinate
+            },
+            attributes={"coordinates": "elevation t", "ham": "eggs"},
+        )
+
+        local_store = obs.store.LocalStore()
+        manifest_store = ManifestStore(manifest_group, stores={"file://": local_store})
+
+        vds = manifest_store.to_virtual_dataset()
+        assert list(vds.variables) == ["T", "elevation", "t"]
+        assert vds.attrs == {"ham": "eggs"}
+        assert list(vds.dims) == ["x", "y", "t"]
+
+        vv = vds.variables["T"]
+        assert isinstance(vv.data, ManifestArray)
+        assert list(vv.dims) == ["x", "y", "t"]
+        # check dims info is not duplicated in two places
+        assert vv.data.metadata.dimension_names is None
+        assert vv.attrs == {}
+
+        assert list(vds.coords) == ["elevation", "t"]
